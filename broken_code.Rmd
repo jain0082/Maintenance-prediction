@@ -1,0 +1,211 @@
+---
+title: "Predictive maintenane"
+output: pdf_document
+date: "February 28, 2018"
+---
+
+```{r,tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+knitr::opts_chunk$set(echo = TRUE,tidy.opts=list(width.cutoff=60),tidy=TRUE,warning = FALSE, 
+                      message = FALSE, echo = TRUE, tidy = TRUE, size="small")
+
+suppressPackageStartupMessages({
+  library(knitr)
+  library(dplyr)
+  library(ggplot2)
+  library(corrplot)
+  library(caret)
+  library(caTools)
+  library(rpart)
+  library(e1071)
+  library(RColorBrewer)
+  library(rattle)	
+  library(party)
+  library(partykit)
+  library(ISLR)
+  library(class)
+})
+```
+
+1. Data Munging
+In this section, we will load the data, and slice and dice it to see if there are any treatments that we need to do on the dataset. This is an important step to make the data good enough to be modelled.
+
+Descriptive statistics
+```{r}
+#Load the data
+pred_data <- read.csv('maintenance_data.csv', header = TRUE)
+
+head(pred_data)
+
+str(pred_data)
+
+summary(pred_data)
+```
+
+Understanding continuous data
+```{r}
+#Using boxplot to get a sense of the medians, quartiles 
+#and outliers for continuous variables
+
+boxplot(pred_data[,c("lifetime","pressureInd", "moistureInd", "temperatureInd")])
+
+#Plotting correlation matrix
+mat <- pred_data[,c("lifetime","pressureInd", "moistureInd", "temperatureInd")]
+corr_mat=cor(mat,method="s")
+corrplot(corr_mat)
+
+#Checking for normality of distribution for all continuous variables
+hist(pred_data$lifetime, xlab = "Lifetime distribution", 
+     main = "Histogram of Lifetime distribution")
+hist(pred_data$pressureInd, xlab = "Pressure Index distribution", main =  "Histogram of Pressre Index distribution")
+hist(pred_data$moistureInd, xlab = "Moisture Index distribution", main =  "Histogram of Moisture Index distribution")
+hist(pred_data$temperatureInd, xlab = "Temperature Index distribution", main= "Histogram of Temperature Index distribution")
+```
+
+Understanding categorical data
+```{r}
+#Converting all categorical variables to factor
+pred_data$broken <- as.factor(pred_data$broken)
+pred_data$team <- as.factor(pred_data$team)
+pred_data$provider <- as.factor(pred_data$provider)
+
+#Looking at all values for the variables
+table(pred_data$broken)
+table(pred_data$team)
+table(pred_data$provider)
+
+```
+
+
+Checking for a statistical difference between features of machines that broke down that those that didnt
+```{r}
+t.test(pred_data[pred_data$broken==0,]$lifetime, 
+       pred_data[pred_data$broken==1,]$lifetime)
+#very small p-value, hence there is a difference between \ 
+#lifetimes of machines that break down and those that don't
+
+t.test(pred_data[pred_data$broken==0,]$pressureInd, 
+       pred_data[pred_data$broken==1,]$pressureInd)
+#signifacnt p-value, hence there we cannot reject null hypothesis, 
+#and hence cannot be sure if there is a difference between 
+#the pressureInd of machines that break down against those that don't
+
+t.test(pred_data[pred_data$broken==0,]$moistureInd, 
+       pred_data[pred_data$broken==1,]$moistureInd)
+##signifacnt p-value, hence there we cannot reject null hypothesis, 
+#and hence cannot be sure if there is a difference between 
+#the moistureInd of machines that break down against those that don't
+
+t.test(pred_data[pred_data$broken==0,]$temperatureInd, 
+       pred_data[pred_data$broken==1,]$temperatureInd)
+#signifacnt p-value, hence there we cannot reject null hypothesis, 
+#and hence cannot be sure if there is a difference between 
+#the temperatureInd of machines that break down against those that don't
+```
+
+This makes intuitive sense, as older the machine, more likely it is to break.
+I thought that the operating conditions would show some difference in machines that breakdown and those that don't, but it does not look like there is any difference. 
+
+
+Generating ggplots for looking at distribution of variables
+```{r} 
+ggplot(pred_data) + 
+  geom_histogram(aes(x = lifetime, fill = broken), stat = "bin", binwidth = 1)
+
+ggplot(pred_data) + geom_bar(aes(x = team, fill = broken), position = "dodge")
+#Checking the distribution of machines break downs across teams
+## It does look like TeamB causes more breakdowns than the rest 
+## TeamA performs the best with the least number of breakdowns
+
+ggplot(pred_data) + geom_bar(aes(x = provider, fill = broken), position = "dodge")
+#Checking to see if any of the providers of the machine stands out for breakdowns. 
+## Provider1 has the most breakdown machines, but it does not look to be an outlier. 
+## Provider2 does very well with the least number of breakdowns. 
+```
+
+2. Modelling
+
+Till now we looked at the data in various ways to see if anything stood out in terms of what was causing breakdowns of the machines. But nothing stood out, so we don't have any particular pattern which we can use to say with confidence that a machine will break down. 
+Hence, we turn to machine learning models. Here, I have split the data into training and testing datasets and build classification models using the following algorithms:
+    i.   Logistic regression
+    ii.  Classfication Tree
+    iii. Support Vector Machines
+    iv.  Naive Bayes
+
+I will compare the performance of all these models and use the one which gives the best accuracy for the model. We can also use other criteria like Precision or Recall to select model depending on our usecase.
+In this case, we want to predict with higher certainity before a machine breaks down. So it is imporatant to flag a machine that is likely to break, i.e., to reduce the false negatives in our model. So we should also select a model that minimizes Recall.
+
+Train test split
+```{r}
+set.seed(84) 
+
+#Train 75% of the data and test on 25%
+sample = sample.split(pred_data, SplitRatio = .75)
+train = subset(pred_data, sample == TRUE)
+test  = subset(pred_data, sample == FALSE)
+```
+
+
+
+i. Logistic regression
+
+```{r}
+log_fit <- glm(broken ~., family=binomial, data = train)
+summary(log_fit)
+log_pred <- predict(log_fit, test, type = c("response"))
+log_pred <- factor(ifelse(log_pred > 0.5, "1", "0") )
+cm_log <- confusionMatrix(log_pred, test$broken, mode = "prec_recall")
+cm_log
+```
+
+
+
+ii. Classification Tree
+```{r}
+tree_fit <- rpart(broken ~., method = 'class', data = train)
+tree_pred <- predict(tree_fit,newdata = test, type = c("class"))
+
+
+cm_tree <- confusionMatrix(tree_pred,test$broken, mode = "prec_recall")
+cm_tree
+
+fancyRpartPlot(tree_fit)
+```
+
+
+iii. SVM
+```{r}
+svm_fit <- svm(broken ~., data = train)
+svm_pred <- predict(svm_fit, newdata= test, type = c("class"))
+cm_svm <- confusionMatrix(svm_pred, test$broken, mode = "prec_recall")
+cm_svm
+```
+
+
+iv. Naive Bayes
+```{r}
+nb_fit <- naiveBayes(broken ~., data = train)
+nb_pred <- predict(nb_fit, newdata = test, type = c("class"))
+cm_nb <- confusionMatrix(nb_pred, test$broken, mode = "prec_recall")
+cm_nb
+```
+
+
+
+```{r}
+
+a <- data.frame(c("Logistic Regression","Classifciation Tree", 
+                  "Support Vector Machine","Naive Bayes"))
+
+colnames(a) <- "Model"
+
+a$Accuracy <- c(cm_log$overall[1]*100, (cm_tree$overall[1]*100), 
+                (cm_svm$overall[1]*100), (cm_nb$overall[1]*100))
+
+a
+
+```
+
+We see that out of all the models trained, Logistic regression performs the best, with an accuracy of 98.6, followed by Classification tree giving an accuracy of 96.5%.
+
+This makes sense as this data is not to complex, with only 6 predictor variables and 1000 rows.
+Also, decision tree makes a more complex model, increasing the chances of overfitting, making logistic regression the best model for this usecase.
